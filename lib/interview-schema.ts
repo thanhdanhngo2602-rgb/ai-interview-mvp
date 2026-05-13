@@ -11,7 +11,7 @@ export const InterviewQuestionSchema = z.object({
   question_text: z.string().min(1),
   expected_core: z.array(z.string()).default([]),
   expected_bonus: z.array(z.string()).default([]),
-  criteria_weights: z.record(z.number()).default(DEFAULT_CRITERIA_WEIGHTS),
+  criteria_weights: z.record(z.string(), z.number()).default(DEFAULT_CRITERIA_WEIGHTS),
   question_weight: z.number().positive().default(10),
   probe_question_optional: z.string().optional(),
   must_have_keywords_optional: z.array(z.string()).default([]),
