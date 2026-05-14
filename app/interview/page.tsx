@@ -41,11 +41,15 @@ export default function InterviewPage() {
     const pc = new RTCPeerConnection();
     pcRef.current = pc;
 
-    pc.ontrack = (event) => {
-      if (audioRef.current) {
-        audioRef.current.srcObject = event.streams[0];
-      }
-    };
+   pc.ontrack = async (event) => {
+  audioEl.srcObject = event.streams[0];
+
+  try {
+    await audioEl.play();
+  } catch (err) {
+    console.error("Audio play failed:", err);
+  }
+};
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
