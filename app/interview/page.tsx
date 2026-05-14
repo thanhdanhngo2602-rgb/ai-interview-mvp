@@ -29,6 +29,7 @@ type FinalReport = {
 export default function InterviewPage() {
   const [config, setConfig] = useState<any>(null);
   const [status, setStatus] = useState("Chưa bắt đầu");
+  const [isConnecting, setIsConnecting] = useState(false);
   const [events, setEvents] = useState<string[]>([]);
   const [candidateText, setCandidateText] = useState("");
   const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
@@ -158,109 +159,156 @@ export default function InterviewPage() {
 
     cleanupRealtimeSession();
     setFinalReport(null);
-    setStatus("Đang tạo realtime token...");
+    setIsConnecting(true);
+    setStatus("🎤 Đang mở microphone và chuẩn bị phiên phỏng vấn...");
 
-    const tokenRes = await fetch("/api/realtime-token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config }),
-    });
+    try {
+      setStatus("🔐 Đang tạo phiên bảo mật với AI Interviewer...");
 
-    const tokenData = await tokenRes.json();
+      const tokenRes = await fetch("/api/realtime-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config }),
+      });
 
-    if (!tokenData.ok || !tokenData.client_secret) {
-      setStatus("Không tạo được token");
-      log(JSON.stringify(tokenData));
-      return;
-    }
+      const tokenData = await tokenRes.json();
 
-    setStatus("Đang mở microphone...");
-
-    const pc = new RTCPeerConnection();
-    pcRef.current = pc;
-
-    const remoteStream = new MediaStream();
-    remoteStreamRef.current = remoteStream;
-
-    pc.ontrack = async (event) => {
-      const [remoteTrack] = event.streams[0]?.getAudioTracks() || [];
-      if (remoteTrack) {
-        remoteStream.addTrack(remoteTrack);
+      if (!tokenData.ok || !tokenData.client_secret) {
+        setStatus("Không tạo được token");
+        log(JSON.stringify(tokenData));
+        setIsConnecting(false);
+        return;
       }
 
-      if (!audioRef.current) return;
-      audioRef.current.srcObject = remoteStream;
+      setStatus("🎤 Đang xin quyền microphone...");
 
-      try {
-        await audioRef.current.play();
-      } catch (err) {
-        console.error("Audio play failed:", err);
-        log("Trình duyệt chưa cho tự động phát audio. Hãy bấm Play trên audio player.");
-      }
+      const pc = new RTCPeerConnection();
+      pcRef.current = pc;
 
-      if (micStreamRef.current && remoteStream.getAudioTracks().length && !recorderRef.current) {
-        await startMixedRecording(micStreamRef.current, remoteStream);
-      }
-    };
+      const remoteStream = new MediaStream();
+      remoteStreamRef.current = remoteStream;
 
-    const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    micStreamRef.current = micStream;
-    micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
+      pc.ontrack = async (event) => {
+        setStatus("🔊 Đang chuẩn bị âm thanh từ AI Interviewer...");
 
-    const dc = pc.createDataChannel("oai-events");
-    dataChannelRef.current = dc;
-
-    dc.onopen = () => {
-      log("Data channel opened");
-    };
-
-    dc.onmessage = (event) => {
-      log(event.data);
-
-      try {
-        const parsed = JSON.parse(event.data);
-
-        if (parsed.type === "response.output_audio_transcript.done" && parsed.transcript) {
-          addTranscript("assistant", parsed.transcript);
+        const [remoteTrack] = event.streams[0]?.getAudioTracks() || [];
+        if (remoteTrack) {
+          remoteStream.addTrack(remoteTrack);
         }
 
-        if (
-          parsed.type === "conversation.item.input_audio_transcription.completed" &&
-          parsed.transcript
-        ) {
-          addTranscript("candidate", parsed.transcript);
+        if (!audioRef.current) return;
+        audioRef.current.srcObject = remoteStream;
+
+        try {
+          await audioRef.current.play();
+          setStatus("✅ AI Interviewer đã sẵn sàng. Bạn có thể bắt đầu trả lời.");
+          setIsConnecting(false);
+        } catch (err) {
+          console.error("Audio play failed:", err);
+          setStatus("⚠️ Trình duyệt chưa cho tự động phát audio. Hãy bấm Play trên audio player.");
+          setIsConnecting(false);
         }
-      } catch {
-        // Keep raw event in the debug log only.
+
+        if (micStreamRef.current && remoteStream.getAudioTracks().length && !recorderRef.current) {
+          await startMixedRecording(micStreamRef.current, remoteStream);
+        }
+      };
+
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      micStreamRef.current = micStream;
+      micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
+
+      setStatus("🔗 Đang kết nối AI Interviewer qua WebRTC...");
+
+      const dc = pc.createDataChannel("oai-events");
+      dataChannelRef.current = dc;
+
+      dc.onopen = () => {
+        log("Data channel opened");
+        setStatus("🤖 Đang khởi động AI Interviewer...");
+      };
+
+      dc.onmessage = (event) => {
+        log(event.data);
+
+        try {
+          const parsed = JSON.parse(event.data);
+
+          if (parsed.type === "response.created") {
+            setStatus("🗣️ AI đang chuẩn bị câu hỏi...");
+          }
+
+          if (parsed.type === "response.output_audio.delta") {
+            setStatus("🗣️ AI đang nói...");
+          }
+
+          if (parsed.type === "response.output_audio.done") {
+            setStatus("🎧 AI đang lắng nghe câu trả lời của bạn...");
+          }
+
+          if (parsed.type === "input_audio_buffer.speech_started") {
+            setStatus("🎙️ Đã phát hiện bạn đang nói...");
+          }
+
+          if (parsed.type === "input_audio_buffer.speech_stopped") {
+            setStatus("⏳ AI đang xử lý câu trả lời...");
+          }
+
+          if (parsed.type === "response.output_audio_transcript.done" && parsed.transcript) {
+            addTranscript("assistant", parsed.transcript);
+          }
+
+          if (
+            parsed.type === "conversation.item.input_audio_transcription.completed" &&
+            parsed.transcript
+          ) {
+            addTranscript("candidate", parsed.transcript);
+          }
+        } catch {
+          // Keep raw event in debug log only.
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      setStatus("🌐 Đang trao đổi tín hiệu với OpenAI Realtime...");
+
+      const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenData.client_secret}`,
+          "Content-Type": "application/sdp",
+        },
+        body: offer.sdp || "",
+      });
+
+      if (!sdpRes.ok) {
+        setStatus("Kết nối WebRTC thất bại");
+        log(await sdpRes.text());
+        cleanupRealtimeSession();
+        setIsConnecting(false);
+        return;
       }
-    };
 
-    setStatus("Đang kết nối WebRTC...");
+      const answerSdp = await sdpRes.text();
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tokenData.client_secret}`,
-        "Content-Type": "application/sdp",
-      },
-      body: offer.sdp || "",
-    });
-
-    if (!sdpRes.ok) {
-      setStatus("Kết nối WebRTC thất bại");
-      log(await sdpRes.text());
+      setStatus("⏳ Đang chờ AI Interviewer phát âm thanh đầu tiên...");
+      log("Realtime voice session started");
+    } catch (err) {
+      console.error(err);
+      setStatus(`Lỗi kết nối: ${err instanceof Error ? err.message : String(err)}`);
+      setIsConnecting(false);
       cleanupRealtimeSession();
-      return;
     }
-
-    const answerSdp = await sdpRes.text();
-    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
-    setStatus("Đang phỏng vấn realtime");
-    log("Realtime voice session started");
   }
 
   function stopRealtimeSession() {
@@ -280,6 +328,7 @@ export default function InterviewPage() {
     micStreamRef.current?.getTracks().forEach((track) => track.stop());
     micStreamRef.current = null;
 
+    setIsConnecting(false);
     setStatus("Đã dừng phỏng vấn");
     log("Realtime voice session stopped");
   }
@@ -409,9 +458,44 @@ export default function InterviewPage() {
   return (
     <main>
       <h1>Interview: {config.job_title || "Unknown Job"}</h1>
-      <p>
-        <strong>Trạng thái:</strong> {status}
-      </p>
+
+      <section className="card">
+        <h2>Trạng thái hệ thống</h2>
+        <div
+          style={{
+            padding: "16px",
+            borderRadius: "12px",
+            background: isConnecting ? "#fff7ed" : "#f8fafc",
+            border: isConnecting ? "1px solid #fdba74" : "1px solid #e2e8f0",
+            fontWeight: 600,
+          }}
+        >
+          {isConnecting && (
+            <span
+              style={{
+                display: "inline-block",
+                width: "10px",
+                height: "10px",
+                borderRadius: "50%",
+                background: "#f97316",
+                marginRight: "8px",
+              }}
+            />
+          )}
+          {status}
+        </div>
+        {isConnecting && (
+          <p style={{ marginTop: "8px", color: "#64748b" }}>
+            Lần kết nối đầu tiên có thể mất vài giây do cần mở microphone, tạo phiên bảo mật và
+            khởi động audio realtime.
+          </p>
+        )}
+
+        <p style={{ marginTop: "12px", color: "#64748b" }}>
+          Khuyến nghị khi phỏng vấn trong phòng họp: đặt micro gần ứng viên, giảm âm lượng loa ở
+          mức vừa đủ, và tránh để loa hướng trực tiếp vào micro để hạn chế echo.
+        </p>
+      </section>
 
       <audio ref={audioRef} autoPlay controls />
 
@@ -420,7 +504,9 @@ export default function InterviewPage() {
         <p>Bấm Start để mở microphone và kết nối OpenAI Realtime qua WebRTC.</p>
 
         <div className="row">
-          <button onClick={startRealtimeSession}>Start Voice Session</button>
+          <button onClick={startRealtimeSession} disabled={isConnecting}>
+            {isConnecting ? "Đang kết nối..." : "Start Voice Session"}
+          </button>
           <button className="secondary" onClick={stopRealtimeSession}>
             Stop
           </button>
@@ -501,12 +587,27 @@ export default function InterviewPage() {
           <h3>Chi tiết từng câu hỏi</h3>
           {finalReport.question_reports.map((item) => (
             <div key={item.question_no} className="card">
+              <h4>Câu {item.question_no}</h4>
+
               <p>
-                <strong>Câu {item.question_no}:</strong> {item.question_text}
+                <strong>Câu hỏi:</strong> {item.question_text}
               </p>
-              <p>
-                <strong>Câu trả lời:</strong> {item.answer}
-              </p>
+
+              <div
+                style={{
+                  padding: "12px",
+                  borderRadius: "8px",
+                  background: "#f8fafc",
+                  border: "1px solid #e2e8f0",
+                  margin: "12px 0",
+                }}
+              >
+                <strong>Câu trả lời của ứng viên:</strong>
+                <p style={{ whiteSpace: "pre-wrap", marginTop: "8px" }}>
+                  {item.answer || "Chưa ghi nhận được câu trả lời."}
+                </p>
+              </div>
+
               {item.score ? (
                 <>
                   <p>
@@ -517,7 +618,17 @@ export default function InterviewPage() {
                     {item.score.exceeded_expectation ? "Có" : "Không"}
                   </p>
                   <p>
-                    <strong>Giải thích:</strong> {item.score.explanation}
+                    <strong>Đánh giá AI:</strong> {item.score.explanation}
+                  </p>
+
+                  <p>
+                    <strong>Điểm mạnh:</strong>{" "}
+                    {(item.score.strengths || []).join("; ") || "Chưa ghi nhận."}
+                  </p>
+
+                  <p>
+                    <strong>Điểm cần cải thiện:</strong>{" "}
+                    {(item.score.weaknesses || []).join("; ") || "Chưa ghi nhận."}
                   </p>
                 </>
               ) : (
