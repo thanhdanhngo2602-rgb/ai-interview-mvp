@@ -144,7 +144,7 @@ export default function InterviewPage() {
     audioContextRef.current = null;
   }
 
-  async function startMixedRecording(micStream: MediaStream, remoteStream: MediaStream) {
+  async function startMixedRecording(micStream: MediaStream, remoteStream?: MediaStream) {
     try {
       if (recordingStartedRef.current) return;
 
@@ -158,35 +158,68 @@ export default function InterviewPage() {
       audioContextRef.current = audioContext;
 
       const destination = audioContext.createMediaStreamDestination();
-      audioContext.createMediaStreamSource(micStream).connect(destination);
-      audioContext.createMediaStreamSource(remoteStream).connect(destination);
+
+      const micSource = audioContext.createMediaStreamSource(micStream);
+      micSource.connect(destination);
+
+      if (remoteStream && remoteStream.getAudioTracks().length > 0) {
+        const aiSource = audioContext.createMediaStreamSource(remoteStream);
+        aiSource.connect(destination);
+        log("Recording mode: mic + AI audio");
+      } else {
+        log("Recording mode: mic only fallback");
+      }
 
       recordedChunksRef.current = [];
 
-      const recorder = new MediaRecorder(destination.stream, {
-        mimeType: MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : undefined,
-      });
+      let recorder: MediaRecorder;
+
+      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+        recorder = new MediaRecorder(destination.stream, { mimeType: "audio/webm;codecs=opus" });
+      } else if (MediaRecorder.isTypeSupported("audio/webm")) {
+        recorder = new MediaRecorder(destination.stream, { mimeType: "audio/webm" });
+      } else {
+        recorder = new MediaRecorder(destination.stream);
+      }
 
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+        if (event.data && event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+          log(`Recording chunk received: ${event.data.size} bytes`);
+        }
       };
 
       recorder.onstop = () => {
         setIsRecording(false);
-        if (!recordedChunksRef.current.length) return;
+        recordingStartedRef.current = false;
+
+        if (!recordedChunksRef.current.length) {
+          log("Không có audio chunk nào để tạo file ghi âm.");
+          setStatus("Đã dừng phỏng vấn nhưng chưa tạo được file ghi âm. Vui lòng thử lại.");
+          return;
+        }
 
         const blob = new Blob(recordedChunksRef.current, { type: "audio/webm" });
         const url = URL.createObjectURL(blob);
         setRecordingUrl(url);
-        log("Đã tạo file ghi âm. Có thể tải xuống.");
+        setStatus("Đã tạo file ghi âm. Bạn có thể tải xuống.");
+        log(`Đã tạo file ghi âm: ${blob.size} bytes`);
       };
 
-      recorder.start();
+      recorder.onerror = (event) => {
+        setIsRecording(false);
+        log(`Recorder error: ${JSON.stringify(event)}`);
+      };
+
+      recorder.start(1000);
       recorderRef.current = recorder;
       recordingStartedRef.current = true;
       setIsRecording(true);
       log("Đã bắt đầu ghi âm phiên phỏng vấn.");
     } catch (err) {
+      setIsRecording(false);
+      recordingStartedRef.current = false;
+      console.error("Recording failed:", err);
       log(`Không thể bắt đầu ghi âm: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -343,6 +376,10 @@ export default function InterviewPage() {
       micStreamRef.current = micStream;
       micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
 
+      // Start recording early with mic-only fallback so a file is always created.
+      // If AI audio becomes available later, the recording still preserves the candidate side.
+      await startMixedRecording(micStream);
+
       updateStep(3, "🔗 Đang kết nối AI Interviewer qua WebRTC...");
 
       const dc = pc.createDataChannel("oai-events");
@@ -369,14 +406,8 @@ export default function InterviewPage() {
             setState("AI_SPEAKING");
             setStatus("🗣️ AI đang nói...");
 
-            if (
-              micStreamRef.current &&
-              remoteStreamRef.current &&
-              remoteStreamRef.current.getAudioTracks().length &&
-              !recordingStartedRef.current
-            ) {
-              await startMixedRecording(micStreamRef.current, remoteStreamRef.current);
-            }
+            // Recording already starts after microphone permission is granted.
+            // Keeping this block intentionally empty prevents duplicate recordings.
           }
 
           if (parsed.type === "response.output_audio.done") {
@@ -464,6 +495,7 @@ export default function InterviewPage() {
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       try {
+        recorder.requestData();
         recorder.stop();
         log("Đang tạo file ghi âm...");
       } catch {
@@ -471,6 +503,7 @@ export default function InterviewPage() {
       }
     } else {
       setIsRecording(false);
+      log("Không có recorder đang chạy nên không tạo được file ghi âm.");
     }
     recorderRef.current = null;
 
@@ -711,7 +744,7 @@ export default function InterviewPage() {
 
           {!isRecording && !recordingUrl && (
             <p style={{ color: "#64748b" }}>
-              File ghi âm sẽ xuất hiện sau khi AI bắt đầu nói và anh/chị bấm Stop.
+              File ghi âm sẽ xuất hiện sau khi anh/chị bấm Stop.
             </p>
           )}
 
