@@ -2,10 +2,29 @@
 
 import { useEffect, useRef, useState } from "react";
 
+type InterviewState =
+  | "IDLE"
+  | "CONNECTING"
+  | "READY"
+  | "AI_SPEAKING"
+  | "WAITING_FOR_ANSWER"
+  | "CANDIDATE_SPEAKING"
+  | "PROCESSING_ANSWER"
+  | "FINISHED"
+  | "ERROR";
+
 type TranscriptItem = {
   role: "assistant" | "candidate";
   text: string;
   timestamp: string;
+  question_no?: number;
+};
+
+type QuestionAnswer = {
+  question_no: number;
+  question_text: string;
+  answer: string;
+  ended_at?: string;
 };
 
 type QuestionReport = {
@@ -26,13 +45,25 @@ type FinalReport = {
   summary: string;
 };
 
+const CONNECT_STEPS = [
+  "Tạo phiên bảo mật",
+  "Mở microphone",
+  "Kết nối WebRTC",
+  "Chuẩn bị âm thanh",
+  "Sẵn sàng phỏng vấn",
+];
+
 export default function InterviewPage() {
   const [config, setConfig] = useState<any>(null);
+  const [state, setState] = useState<InterviewState>("IDLE");
   const [status, setStatus] = useState("Chưa bắt đầu");
-  const [isConnecting, setIsConnecting] = useState(false);
+  const [connectStep, setConnectStep] = useState(0);
   const [events, setEvents] = useState<string[]>([]);
   const [candidateText, setCandidateText] = useState("");
   const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
+  const [questionAnswers, setQuestionAnswers] = useState<QuestionAnswer[]>([]);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [currentAnswerBuffer, setCurrentAnswerBuffer] = useState("");
   const [finalReport, setFinalReport] = useState<FinalReport | null>(null);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
@@ -45,6 +76,10 @@ export default function InterviewPage() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const answerBufferRef = useRef("");
+  const currentQuestionIndexRef = useRef(0);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recordingStartedRef = useRef(false);
 
   useEffect(() => {
     const raw = sessionStorage.getItem("interview_config");
@@ -52,36 +87,40 @@ export default function InterviewPage() {
 
     return () => {
       cleanupRealtimeSession();
-      if (recordingUrl) URL.revokeObjectURL(recordingUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function log(message: string) {
-    setEvents((prev) => [`${new Date().toLocaleTimeString()} - ${message}`, ...prev].slice(0, 40));
+    setEvents((prev) => [`${new Date().toLocaleTimeString()} - ${message}`, ...prev].slice(0, 120));
   }
 
-  function addTranscript(role: "assistant" | "candidate", text: string) {
+  function updateStep(step: number, nextStatus: string) {
+    setConnectStep(step);
+    setStatus(nextStatus);
+  }
+
+  function addTranscript(role: "assistant" | "candidate", text: string, questionNo?: number) {
     const cleanText = text.trim();
     if (!cleanText) return;
 
     setTranscript((prev) => [
       ...prev,
-      {
-        role,
-        text: cleanText,
-        timestamp: new Date().toISOString(),
-      },
+      { role, text: cleanText, timestamp: new Date().toISOString(), question_no: questionNo },
     ]);
   }
 
   function cleanupRealtimeSession() {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+
     try {
       recorderRef.current?.stop();
     } catch {
-      // Recorder may already be inactive.
+      // ignore
     }
+
     recorderRef.current = null;
+    recordingStartedRef.current = false;
 
     dataChannelRef.current?.close();
     dataChannelRef.current = null;
@@ -95,9 +134,7 @@ export default function InterviewPage() {
     remoteStreamRef.current?.getTracks().forEach((track) => track.stop());
     remoteStreamRef.current = null;
 
-    if (audioRef.current) {
-      audioRef.current.srcObject = null;
-    }
+    if (audioRef.current) audioRef.current.srcObject = null;
 
     if (audioContextRef.current && audioContextRef.current.state !== "closed") {
       audioContextRef.current.close().catch(() => {});
@@ -107,6 +144,8 @@ export default function InterviewPage() {
 
   async function startMixedRecording(micStream: MediaStream, remoteStream: MediaStream) {
     try {
+      if (recordingStartedRef.current) return;
+
       if (recordingUrl) {
         URL.revokeObjectURL(recordingUrl);
         setRecordingUrl(null);
@@ -117,12 +156,8 @@ export default function InterviewPage() {
       audioContextRef.current = audioContext;
 
       const destination = audioContext.createMediaStreamDestination();
-
-      const micSource = audioContext.createMediaStreamSource(micStream);
-      micSource.connect(destination);
-
-      const aiSource = audioContext.createMediaStreamSource(remoteStream);
-      aiSource.connect(destination);
+      audioContext.createMediaStreamSource(micStream).connect(destination);
+      audioContext.createMediaStreamSource(remoteStream).connect(destination);
 
       recordedChunksRef.current = [];
 
@@ -131,9 +166,7 @@ export default function InterviewPage() {
       });
 
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
-        }
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
       };
 
       recorder.onstop = () => {
@@ -147,11 +180,94 @@ export default function InterviewPage() {
 
       recorder.start();
       recorderRef.current = recorder;
+      recordingStartedRef.current = true;
       log("Đã bắt đầu ghi âm phiên phỏng vấn.");
     } catch (err) {
-      console.error("Recording failed:", err);
       log(`Không thể bắt đầu ghi âm: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  function sendRealtimeEvent(payload: any) {
+    const dc = dataChannelRef.current;
+    if (!dc || dc.readyState !== "open") {
+      log("Data channel chưa sẵn sàng.");
+      return;
+    }
+    dc.send(JSON.stringify(payload));
+  }
+
+  function requestFirstQuestion() {
+    sendRealtimeEvent({
+      type: "response.create",
+      response: {
+        instructions:
+          "Hãy bắt đầu buổi phỏng vấn. Chào ứng viên thật ngắn gọn, sau đó hỏi câu hỏi đầu tiên trong danh sách. Không hỏi nhiều câu cùng lúc.",
+      },
+    });
+  }
+
+  function requestConfirmAndNextQuestion() {
+    const questionCount = config?.questions?.length || 0;
+    const currentIndex = currentQuestionIndexRef.current;
+
+    if (currentIndex >= questionCount - 1) {
+      sendRealtimeEvent({
+        type: "response.create",
+        response: {
+          instructions:
+            "Hãy nói: Cảm ơn bạn, mình đã ghi nhận câu trả lời. Buổi phỏng vấn đến đây là kết thúc. Cảm ơn bạn đã tham gia.",
+        },
+      });
+      setState("FINISHED");
+      setStatus("Phỏng vấn đã hoàn tất. Bạn có thể tạo báo cáo.");
+      return;
+    }
+
+    currentQuestionIndexRef.current = currentIndex + 1;
+    setCurrentQuestionIndex(currentIndex + 1);
+    answerBufferRef.current = "";
+    setCurrentAnswerBuffer("");
+
+    sendRealtimeEvent({
+      type: "response.create",
+      response: {
+        instructions:
+          "Hãy xác nhận ngắn gọn: Cảm ơn bạn, mình đã ghi nhận câu trả lời. Sau đó chuyển sang câu hỏi tiếp theo trong danh sách. Chỉ hỏi một câu.",
+      },
+    });
+  }
+
+  function finalizeCurrentAnswer() {
+    const answer = answerBufferRef.current.trim();
+    const q = config?.questions?.[currentQuestionIndexRef.current];
+    if (!q) return;
+
+    if (!answer) {
+      setStatus("Chưa ghi nhận được câu trả lời. AI sẽ tiếp tục chờ ứng viên.");
+      setState("WAITING_FOR_ANSWER");
+      return;
+    }
+
+    const qa: QuestionAnswer = {
+      question_no: q.question_no || currentQuestionIndexRef.current + 1,
+      question_text: q.question_text,
+      answer,
+      ended_at: new Date().toISOString(),
+    };
+
+    setQuestionAnswers((prev) => {
+      const withoutCurrent = prev.filter((item) => item.question_no !== qa.question_no);
+      return [...withoutCurrent, qa].sort((a, b) => a.question_no - b.question_no);
+    });
+
+    setState("PROCESSING_ANSWER");
+    setStatus("Đã ghi nhận câu trả lời. AI đang chuyển sang câu tiếp theo...");
+    requestConfirmAndNextQuestion();
+  }
+
+  function scheduleAnswerFinalize() {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = setTimeout(() => finalizeCurrentAnswer(), 2500);
   }
 
   async function startRealtimeSession() {
@@ -159,12 +275,17 @@ export default function InterviewPage() {
 
     cleanupRealtimeSession();
     setFinalReport(null);
-    setIsConnecting(true);
-    setStatus("🎤 Đang mở microphone và chuẩn bị phiên phỏng vấn...");
+    setQuestionAnswers([]);
+    setTranscript([]);
+    setCandidateText("");
+    setCurrentQuestionIndex(0);
+    currentQuestionIndexRef.current = 0;
+    answerBufferRef.current = "";
+    setCurrentAnswerBuffer("");
+    setState("CONNECTING");
+    updateStep(1, "🔐 Đang tạo phiên bảo mật với AI Interviewer...");
 
     try {
-      setStatus("🔐 Đang tạo phiên bảo mật với AI Interviewer...");
-
       const tokenRes = await fetch("/api/realtime-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -174,13 +295,13 @@ export default function InterviewPage() {
       const tokenData = await tokenRes.json();
 
       if (!tokenData.ok || !tokenData.client_secret) {
+        setState("ERROR");
         setStatus("Không tạo được token");
         log(JSON.stringify(tokenData));
-        setIsConnecting(false);
         return;
       }
 
-      setStatus("🎤 Đang xin quyền microphone...");
+      updateStep(2, "🎤 Đang xin quyền microphone...");
 
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
@@ -189,28 +310,21 @@ export default function InterviewPage() {
       remoteStreamRef.current = remoteStream;
 
       pc.ontrack = async (event) => {
-        setStatus("🔊 Đang chuẩn bị âm thanh từ AI Interviewer...");
+        updateStep(4, "🔊 Đang chuẩn bị âm thanh từ AI Interviewer...");
 
         const [remoteTrack] = event.streams[0]?.getAudioTracks() || [];
-        if (remoteTrack) {
-          remoteStream.addTrack(remoteTrack);
-        }
+        if (remoteTrack) remoteStream.addTrack(remoteTrack);
 
         if (!audioRef.current) return;
         audioRef.current.srcObject = remoteStream;
 
         try {
           await audioRef.current.play();
-          setStatus("✅ AI Interviewer đã sẵn sàng. Bạn có thể bắt đầu trả lời.");
-          setIsConnecting(false);
-        } catch (err) {
-          console.error("Audio play failed:", err);
+          updateStep(5, "✅ AI Interviewer đã sẵn sàng.");
+          setState("READY");
+        } catch {
+          setState("ERROR");
           setStatus("⚠️ Trình duyệt chưa cho tự động phát audio. Hãy bấm Play trên audio player.");
-          setIsConnecting(false);
-        }
-
-        if (micStreamRef.current && remoteStream.getAudioTracks().length && !recorderRef.current) {
-          await startMixedRecording(micStreamRef.current, remoteStream);
         }
       };
 
@@ -225,54 +339,84 @@ export default function InterviewPage() {
       micStreamRef.current = micStream;
       micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
 
-      setStatus("🔗 Đang kết nối AI Interviewer qua WebRTC...");
+      updateStep(3, "🔗 Đang kết nối AI Interviewer qua WebRTC...");
 
       const dc = pc.createDataChannel("oai-events");
       dataChannelRef.current = dc;
 
       dc.onopen = () => {
         log("Data channel opened");
-        setStatus("🤖 Đang khởi động AI Interviewer...");
+        setStatus("🤖 AI đang chuẩn bị câu hỏi đầu tiên...");
+        requestFirstQuestion();
       };
 
-      dc.onmessage = (event) => {
+      dc.onmessage = async (event) => {
         log(event.data);
 
         try {
           const parsed = JSON.parse(event.data);
 
           if (parsed.type === "response.created") {
-            setStatus("🗣️ AI đang chuẩn bị câu hỏi...");
+            setState("AI_SPEAKING");
+            setStatus("🗣️ AI đang chuẩn bị nói...");
           }
 
           if (parsed.type === "response.output_audio.delta") {
+            setState("AI_SPEAKING");
             setStatus("🗣️ AI đang nói...");
+
+            if (
+              micStreamRef.current &&
+              remoteStreamRef.current &&
+              remoteStreamRef.current.getAudioTracks().length &&
+              !recordingStartedRef.current
+            ) {
+              await startMixedRecording(micStreamRef.current, remoteStreamRef.current);
+            }
           }
 
           if (parsed.type === "response.output_audio.done") {
+            setState("WAITING_FOR_ANSWER");
             setStatus("🎧 AI đang lắng nghe câu trả lời của bạn...");
           }
 
           if (parsed.type === "input_audio_buffer.speech_started") {
-            setStatus("🎙️ Đã phát hiện bạn đang nói...");
+            setState("CANDIDATE_SPEAKING");
+            setStatus("🎙️ Đã phát hiện ứng viên đang nói...");
+
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+              silenceTimerRef.current = null;
+            }
           }
 
           if (parsed.type === "input_audio_buffer.speech_stopped") {
-            setStatus("⏳ AI đang xử lý câu trả lời...");
+            setState("PROCESSING_ANSWER");
+            setStatus("⏳ Đang chờ ứng viên kết thúc câu trả lời...");
+            scheduleAnswerFinalize();
           }
 
           if (parsed.type === "response.output_audio_transcript.done" && parsed.transcript) {
-            addTranscript("assistant", parsed.transcript);
+            addTranscript(
+              "assistant",
+              parsed.transcript,
+              config?.questions?.[currentQuestionIndexRef.current]?.question_no
+            );
           }
 
           if (
             parsed.type === "conversation.item.input_audio_transcription.completed" &&
             parsed.transcript
           ) {
-            addTranscript("candidate", parsed.transcript);
+            const qNo = config?.questions?.[currentQuestionIndexRef.current]?.question_no;
+            const cleanText = parsed.transcript.trim();
+
+            answerBufferRef.current = `${answerBufferRef.current} ${cleanText}`.trim();
+            setCurrentAnswerBuffer(answerBufferRef.current);
+            addTranscript("candidate", cleanText, qNo);
           }
         } catch {
-          // Keep raw event in debug log only.
+          // keep raw log only
         }
       };
 
@@ -291,10 +435,10 @@ export default function InterviewPage() {
       });
 
       if (!sdpRes.ok) {
+        setState("ERROR");
         setStatus("Kết nối WebRTC thất bại");
         log(await sdpRes.text());
         cleanupRealtimeSession();
-        setIsConnecting(false);
         return;
       }
 
@@ -304,18 +448,19 @@ export default function InterviewPage() {
       setStatus("⏳ Đang chờ AI Interviewer phát âm thanh đầu tiên...");
       log("Realtime voice session started");
     } catch (err) {
-      console.error(err);
+      setState("ERROR");
       setStatus(`Lỗi kết nối: ${err instanceof Error ? err.message : String(err)}`);
-      setIsConnecting(false);
       cleanupRealtimeSession();
     }
   }
 
   function stopRealtimeSession() {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+
     try {
       recorderRef.current?.stop();
     } catch {
-      // Recorder may already be inactive.
+      // ignore
     }
     recorderRef.current = null;
 
@@ -328,28 +473,25 @@ export default function InterviewPage() {
     micStreamRef.current?.getTracks().forEach((track) => track.stop());
     micStreamRef.current = null;
 
-    setIsConnecting(false);
-    setStatus("Đã dừng phỏng vấn");
+    setState("FINISHED");
+    setStatus("Đã dừng phỏng vấn. Bạn có thể tạo báo cáo.");
     log("Realtime voice session stopped");
   }
 
-  function splitCandidateAnswers(): string[] {
-    const candidateTranscript = transcript
-      .filter((item) => item.role === "candidate")
-      .map((item) => item.text);
+  function getAnswersForScoring(): string[] {
+    const answersByQuestion = config.questions.map((q: any, index: number) => {
+      const qNo = q.question_no || index + 1;
+      return questionAnswers.find((item) => item.question_no === qNo)?.answer || "";
+    });
 
-    if (candidateTranscript.length >= config.questions.length) {
-      return config.questions.map((_: any, index: number) => candidateTranscript[index] || "");
-    }
+    if (answersByQuestion.some(Boolean)) return answersByQuestion;
 
     const fallbackAnswers = candidateText
       .split(/\n\s*\n|---|Câu\s+\d+:/i)
       .map((x) => x.trim())
       .filter(Boolean);
 
-    return config.questions.map((_: any, index: number) => {
-      return candidateTranscript[index] || fallbackAnswers[index] || "";
-    });
+    return config.questions.map((_: any, index: number) => fallbackAnswers[index] || "");
   }
 
   function buildRecommendation(totalScore: number): "Pass" | "Consider" | "Reject" {
@@ -365,7 +507,7 @@ export default function InterviewPage() {
     setFinalReport(null);
     setStatus("Đang tạo báo cáo đánh giá...");
 
-    const answers = splitCandidateAnswers();
+    const answers = getAnswersForScoring();
     const questionReports: QuestionReport[] = [];
 
     for (let i = 0; i < config.questions.length; i++) {
@@ -453,7 +595,33 @@ export default function InterviewPage() {
     URL.revokeObjectURL(url);
   }
 
+  function downloadDebugLogs() {
+    const debugPayload = {
+      state,
+      status,
+      currentQuestionIndex,
+      currentAnswerBuffer,
+      questionAnswers,
+      transcript,
+      events,
+    };
+
+    const blob = new Blob([JSON.stringify(debugPayload, null, 2)], {
+      type: "application/json",
+    });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ai-interview-debug-logs-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   if (!config) return <main>Không tìm thấy interview config. Hãy quay lại trang upload.</main>;
+
+  const progressPercent = Math.round((connectStep / CONNECT_STEPS.length) * 100);
+  const currentQuestion = config.questions?.[currentQuestionIndex];
 
   return (
     <main>
@@ -461,39 +629,49 @@ export default function InterviewPage() {
 
       <section className="card">
         <h2>Trạng thái hệ thống</h2>
+
         <div
           style={{
             padding: "16px",
             borderRadius: "12px",
-            background: isConnecting ? "#fff7ed" : "#f8fafc",
-            border: isConnecting ? "1px solid #fdba74" : "1px solid #e2e8f0",
+            background: state === "CONNECTING" ? "#fff7ed" : "#f8fafc",
+            border: state === "CONNECTING" ? "1px solid #fdba74" : "1px solid #e2e8f0",
             fontWeight: 600,
           }}
         >
-          {isConnecting && (
-            <span
-              style={{
-                display: "inline-block",
-                width: "10px",
-                height: "10px",
-                borderRadius: "50%",
-                background: "#f97316",
-                marginRight: "8px",
-              }}
-            />
-          )}
           {status}
         </div>
-        {isConnecting && (
-          <p style={{ marginTop: "8px", color: "#64748b" }}>
-            Lần kết nối đầu tiên có thể mất vài giây do cần mở microphone, tạo phiên bảo mật và
-            khởi động audio realtime.
-          </p>
+
+        {state === "CONNECTING" && (
+          <div style={{ marginTop: "14px" }}>
+            <div
+              style={{
+                width: "100%",
+                height: "10px",
+                background: "#e2e8f0",
+                borderRadius: "999px",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${progressPercent}%`,
+                  height: "100%",
+                  background: "#f97316",
+                  transition: "width 0.3s ease",
+                }}
+              />
+            </div>
+            <p style={{ marginTop: "8px", color: "#64748b" }}>
+              Đang thực hiện bước {connectStep}/{CONNECT_STEPS.length}:{" "}
+              {CONNECT_STEPS[Math.max(connectStep - 1, 0)]}
+            </p>
+          </div>
         )}
 
         <p style={{ marginTop: "12px", color: "#64748b" }}>
-          Khuyến nghị khi phỏng vấn trong phòng họp: đặt micro gần ứng viên, giảm âm lượng loa ở
-          mức vừa đủ, và tránh để loa hướng trực tiếp vào micro để hạn chế echo.
+          Khuyến nghị phòng họp: đặt micro gần ứng viên, giảm âm lượng loa ở mức vừa đủ, tránh để
+          loa hướng trực tiếp vào micro để hạn chế echo.
         </p>
       </section>
 
@@ -501,11 +679,17 @@ export default function InterviewPage() {
 
       <section className="card">
         <h2>Voice Interview</h2>
-        <p>Bấm Start để mở microphone và kết nối OpenAI Realtime qua WebRTC.</p>
+
+        {currentQuestion && (
+          <p>
+            <strong>Câu hiện tại:</strong> Câu {currentQuestion.question_no || currentQuestionIndex + 1}:{" "}
+            {currentQuestion.question_text}
+          </p>
+        )}
 
         <div className="row">
-          <button onClick={startRealtimeSession} disabled={isConnecting}>
-            {isConnecting ? "Đang kết nối..." : "Start Voice Session"}
+          <button onClick={startRealtimeSession} disabled={state === "CONNECTING"}>
+            {state === "CONNECTING" ? "Đang kết nối..." : "Start Voice Session"}
           </button>
           <button className="secondary" onClick={stopRealtimeSession}>
             Stop
@@ -522,16 +706,36 @@ export default function InterviewPage() {
       </section>
 
       <section className="card">
+        <h2>Câu trả lời đã ghi nhận</h2>
+        {questionAnswers.length ? (
+          questionAnswers.map((item) => (
+            <div key={item.question_no} className="card">
+              <strong>Câu {item.question_no}:</strong> {item.question_text}
+              <p style={{ whiteSpace: "pre-wrap" }}>{item.answer}</p>
+            </div>
+          ))
+        ) : (
+          <p>Chưa ghi nhận câu trả lời nào.</p>
+        )}
+
+        {currentAnswerBuffer && (
+          <div className="card">
+            <strong>Đang ghi nhận câu hiện tại:</strong>
+            <p style={{ whiteSpace: "pre-wrap" }}>{currentAnswerBuffer}</p>
+          </div>
+        )}
+      </section>
+
+      <section className="card">
         <h2>Kết thúc phỏng vấn & tạo báo cáo</h2>
         <p>
-          Khi kết thúc phỏng vấn, hệ thống sẽ chấm toàn bộ câu hỏi trong file Excel và tạo báo
-          cáo cuối cùng.
+          Khi kết thúc phỏng vấn, hệ thống sẽ chấm toàn bộ câu hỏi trong file Excel và tạo báo cáo
+          cuối cùng.
         </p>
 
         <p>
-          <strong>Lưu ý MVP:</strong> nếu transcript từ realtime chưa tách đúng theo từng câu,
-          anh/chị có thể dán câu trả lời theo thứ tự câu hỏi vào ô bên dưới. Mỗi câu cách nhau
-          bằng một dòng trống.
+          <strong>Fallback MVP:</strong> nếu phần ghi nhận tự động chưa đúng, anh/chị có thể dán
+          câu trả lời theo thứ tự câu hỏi vào ô bên dưới. Mỗi câu cách nhau bằng một dòng trống.
         </p>
 
         <textarea
@@ -620,16 +824,6 @@ export default function InterviewPage() {
                   <p>
                     <strong>Đánh giá AI:</strong> {item.score.explanation}
                   </p>
-
-                  <p>
-                    <strong>Điểm mạnh:</strong>{" "}
-                    {(item.score.strengths || []).join("; ") || "Chưa ghi nhận."}
-                  </p>
-
-                  <p>
-                    <strong>Điểm cần cải thiện:</strong>{" "}
-                    {(item.score.weaknesses || []).join("; ") || "Chưa ghi nhận."}
-                  </p>
                 </>
               ) : (
                 <p>
@@ -653,8 +847,9 @@ export default function InterviewPage() {
       </section>
 
       <section className="card">
-        <h2>Realtime events</h2>
-        <pre>{events.join("\n\n")}</pre>
+        <h2>Debug logs</h2>
+        <p>Log kỹ thuật được ẩn khỏi màn hình. Chỉ tải xuống khi cần kiểm tra lỗi.</p>
+        <button onClick={downloadDebugLogs}>Tải logs kỹ thuật</button>
       </section>
     </main>
   );
