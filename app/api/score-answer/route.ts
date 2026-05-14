@@ -15,11 +15,33 @@ const scoringJsonSchema = {
       penalty_score: { type: "number" },
       total_score: { type: "number" },
       exceeded_expectation: { type: "boolean" },
-      criterion_breakdown: { type: "object", additionalProperties: { type: "number" } },
-      strengths: { type: "array", items: { type: "string" } },
-      weaknesses: { type: "array", items: { type: "string" } },
+      criterion_breakdown: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          domain_knowledge: { type: "number" },
+          problem_solving: { type: "number" },
+          communication: { type: "number" }
+        },
+        required: [
+          "domain_knowledge",
+          "problem_solving",
+          "communication"
+        ]
+      },
+      strengths: {
+        type: "array",
+        items: { type: "string" }
+      },
+      weaknesses: {
+        type: "array",
+        items: { type: "string" }
+      },
       explanation: { type: "string" },
-      confidence: { type: "string", enum: ["low", "medium", "high"] }
+      confidence: {
+        type: "string",
+        enum: ["low", "medium", "high"]
+      }
     },
     required: [
       "core_coverage_score",
