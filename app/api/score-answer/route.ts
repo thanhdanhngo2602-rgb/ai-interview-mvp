@@ -9,39 +9,56 @@ const scoringJsonSchema = {
     type: "object",
     additionalProperties: false,
     properties: {
-      core_coverage_score: { type: "number" },
-      quality_score: { type: "number" },
-      bonus_score: { type: "number" },
-      penalty_score: { type: "number" },
-      total_score: { type: "number" },
-      exceeded_expectation: { type: "boolean" },
+      core_coverage_score: {
+        type: "number",
+        description: "Điểm mức độ bao phủ expected core, thang 0-10.",
+      },
+      quality_score: {
+        type: "number",
+        description: "Điểm chất lượng câu trả lời, thang 0-10.",
+      },
+      bonus_score: {
+        type: "number",
+        description: "Điểm cộng vượt mong đợi, thang 0-2.",
+      },
+      penalty_score: {
+        type: "number",
+        description: "Điểm trừ nếu mơ hồ/lạc đề, thang 0-5.",
+      },
+      total_score: {
+        type: "number",
+        description: "Tổng điểm cuối cùng cho câu hỏi, thang 0-10.",
+      },
+      exceeded_expectation: {
+        type: "boolean",
+        description: "Ứng viên có trả lời vượt mong đợi hay không.",
+      },
       criterion_breakdown: {
         type: "object",
         additionalProperties: false,
         properties: {
           domain_knowledge: { type: "number" },
           problem_solving: { type: "number" },
-          communication: { type: "number" }
+          communication: { type: "number" },
         },
-        required: [
-          "domain_knowledge",
-          "problem_solving",
-          "communication"
-        ]
+        required: ["domain_knowledge", "problem_solving", "communication"],
       },
       strengths: {
         type: "array",
-        items: { type: "string" }
+        items: { type: "string" },
       },
       weaknesses: {
         type: "array",
-        items: { type: "string" }
+        items: { type: "string" },
       },
-      explanation: { type: "string" },
+      explanation: {
+        type: "string",
+        description: "Giải thích ngắn gọn vì sao chấm điểm như vậy.",
+      },
       confidence: {
         type: "string",
-        enum: ["low", "medium", "high"]
-      }
+        enum: ["low", "medium", "high"],
+      },
     },
     required: [
       "core_coverage_score",
@@ -54,32 +71,49 @@ const scoringJsonSchema = {
       "strengths",
       "weaknesses",
       "explanation",
-      "confidence"
-    ]
+      "confidence",
+    ],
   },
-  strict: true
+  strict: true,
 };
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+
     const question = InterviewQuestionSchema.parse(body.question);
     const answer = String(body.answer || "").trim();
 
     if (!answer) {
-      return NextResponse.json({ ok: false, error: "Thiếu câu trả lời của ứng viên." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Thiếu câu trả lời của ứng viên." },
+        { status: 400 }
+      );
     }
 
     const response = await openai.responses.create({
       model: SCORING_MODEL,
       input: buildScoringPrompt(question, answer),
-      text: { format: { type: "json_schema", ...scoringJsonSchema } }
+      text: {
+        format: {
+          type: "json_schema",
+          ...scoringJsonSchema,
+        },
+      },
     });
 
-    return NextResponse.json({ ok: true, score: JSON.parse(response.output_text) });
+    const parsedScore = JSON.parse(response.output_text);
+
+    return NextResponse.json({
+      ok: true,
+      score: parsedScore,
+    });
   } catch (error) {
     return NextResponse.json(
-      { ok: false, error: error instanceof Error ? error.message : "Score answer failed" },
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "Score answer failed",
+      },
       { status: 500 }
     );
   }
