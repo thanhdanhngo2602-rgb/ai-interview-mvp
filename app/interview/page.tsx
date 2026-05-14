@@ -59,14 +59,14 @@ export default function InterviewPage() {
     await pc.setLocalDescription(offer);
 
     const realtimeModel = process.env.NEXT_PUBLIC_OPENAI_REALTIME_MODEL || "gpt-realtime";
-    const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(realtimeModel)}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tokenData.client_secret}`,
-        "Content-Type": "application/sdp"
-      },
-      body: offer.sdp || ""
-    });
+const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${tokenData.client_secret}`,
+    "Content-Type": "application/sdp"
+  },
+  body: offer.sdp || ""
+});
 
     if (!sdpRes.ok) {
       setStatus("Kết nối WebRTC thất bại");
