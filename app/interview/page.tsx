@@ -40,7 +40,12 @@ export default function InterviewPage() {
     setStatus("Đang mở microphone...");
     const pc = new RTCPeerConnection();
     pcRef.current = pc;
+    
+const audioEl = document.createElement("audio");
+audioEl.autoplay = true;
+audioEl.controls = true;
 
+document.body.appendChild(audioEl);
    pc.ontrack = async (event) => {
   audioEl.srcObject = event.streams[0];
 
