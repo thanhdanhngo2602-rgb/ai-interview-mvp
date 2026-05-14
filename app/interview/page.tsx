@@ -67,6 +67,7 @@ export default function InterviewPage() {
   const [finalReport, setFinalReport] = useState<FinalReport | null>(null);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -121,6 +122,7 @@ export default function InterviewPage() {
 
     recorderRef.current = null;
     recordingStartedRef.current = false;
+    setIsRecording(false);
 
     dataChannelRef.current?.close();
     dataChannelRef.current = null;
@@ -170,6 +172,7 @@ export default function InterviewPage() {
       };
 
       recorder.onstop = () => {
+        setIsRecording(false);
         if (!recordedChunksRef.current.length) return;
 
         const blob = new Blob(recordedChunksRef.current, { type: "audio/webm" });
@@ -181,6 +184,7 @@ export default function InterviewPage() {
       recorder.start();
       recorderRef.current = recorder;
       recordingStartedRef.current = true;
+      setIsRecording(true);
       log("Đã bắt đầu ghi âm phiên phỏng vấn.");
     } catch (err) {
       log(`Không thể bắt đầu ghi âm: ${err instanceof Error ? err.message : String(err)}`);
@@ -457,10 +461,16 @@ export default function InterviewPage() {
   function stopRealtimeSession() {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
 
-    try {
-      recorderRef.current?.stop();
-    } catch {
-      // ignore
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      try {
+        recorder.stop();
+        log("Đang tạo file ghi âm...");
+      } catch {
+        setIsRecording(false);
+      }
+    } else {
+      setIsRecording(false);
     }
     recorderRef.current = null;
 
@@ -696,13 +706,21 @@ export default function InterviewPage() {
           </button>
         </div>
 
-        {recordingUrl && (
-          <p>
+        <div style={{ marginTop: "12px" }}>
+          {isRecording && !recordingUrl && <p>🎙️ Đang ghi âm buổi phỏng vấn...</p>}
+
+          {!isRecording && !recordingUrl && (
+            <p style={{ color: "#64748b" }}>
+              File ghi âm sẽ xuất hiện sau khi AI bắt đầu nói và anh/chị bấm Stop.
+            </p>
+          )}
+
+          {recordingUrl && (
             <a href={recordingUrl} download={`ai-interview-recording-${Date.now()}.webm`}>
               Tải file ghi âm buổi phỏng vấn
             </a>
-          </p>
-        )}
+          )}
+        </div>
       </section>
 
       <section className="card">
