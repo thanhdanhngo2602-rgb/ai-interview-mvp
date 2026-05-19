@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-
+import { createRecordingController } from "@/lib/recording";
+import { InterviewStateMachine, type InterviewState } from "@/lib/interview-state";
+import { DebugLogger } from "@/lib/debug-log";
 type TranscriptItem = {
   role: "assistant" | "candidate";
   text: string;
