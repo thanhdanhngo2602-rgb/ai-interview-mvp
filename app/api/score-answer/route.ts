@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { openai, SCORING_MODEL } from "@/lib/openai";
+import { getOpenAIClient, SCORING_MODEL } from "@/lib/openai";
 import { buildScoringPrompt } from "@/prompts/scoring-prompt";
 import { InterviewQuestionSchema } from "@/lib/interview-schema";
 
@@ -91,7 +91,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const response = await openai.responses.create({
+   const openai = getOpenAIClient();
+
+const response = await openai.responses.create({
       model: SCORING_MODEL,
       input: buildScoringPrompt(question, answer),
       text: {
