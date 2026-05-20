@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { openai, SCORING_MODEL } from "@/lib/openai";
+import { getOpenAIClient, SCORING_MODEL } from "@/lib/openai";
 import { InterviewConfigSchema } from "@/lib/interview-schema";
 import { buildConfigValidationPrompt } from "@/prompts/config-validation-prompt";
 
