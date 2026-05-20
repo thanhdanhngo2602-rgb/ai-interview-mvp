@@ -213,8 +213,22 @@ export default function InterviewPage() {
     dataChannelRef.current = dc;
 
     dc.onopen = () => {
-      log("Data channel opened");
-    };
+  log("Data channel opened");
+
+  setStatus("AI đang chuẩn bị câu hỏi đầu tiên...");
+
+  setSystemState("AI_SPEAKING");
+
+  dc.send(
+    JSON.stringify({
+      type: "response.create",
+      response: {
+        instructions:
+          "Hãy bắt đầu buổi phỏng vấn ngay lập tức. Chào ứng viên rất ngắn gọn rồi hỏi đúng câu hỏi đầu tiên trong danh sách. Không giải thích dài dòng. Không hỏi nhiều câu cùng lúc.",
+      },
+    })
+  );
+};
 
     dc.onmessage = (event) => {
       log(event.data);
