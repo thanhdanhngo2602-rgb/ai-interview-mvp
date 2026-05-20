@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const config = InterviewConfigSchema.parse(body.config);
-
+const openai = getOpenAIClient();
     const response = await openai.responses.create({
       model: SCORING_MODEL,
       input: buildConfigValidationPrompt(config),
