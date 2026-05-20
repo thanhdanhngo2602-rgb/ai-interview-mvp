@@ -212,12 +212,10 @@ export default function InterviewPage() {
     const dc = pc.createDataChannel("oai-events");
     dataChannelRef.current = dc;
 
-    dc.onopen = () => {
+dc.onopen = () => {
   log("Data channel opened");
 
   setStatus("AI đang chuẩn bị câu hỏi đầu tiên...");
-
-  setSystemState("AI_SPEAKING");
 
   dc.send(
     JSON.stringify({
